@@ -15,13 +15,13 @@ class _LogOutState extends State<LogOut> {
   @override
   void didChangeDependencies() {
     super.didChangeDependencies();
-    // Schedule the dialog after the current frame
     WidgetsBinding.instance.addPostFrameCallback((_) => _confirmLogout(context));
   }
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
+      backgroundColor: Theme.of(context).scaffoldBackgroundColor,
       body: Center(
         child:
             _isLoggingOut
@@ -32,7 +32,7 @@ class _LogOutState extends State<LogOut> {
                       valueColor: AlwaysStoppedAnimation<Color>(Theme.of(context).primaryColor),
                     ),
                     const SizedBox(height: 16),
-                    const Text('Logging out...', style: TextStyle(color: Colors.grey)),
+                    Text('Logging out...', style: TextStyle(color: Theme.of(context).hintColor)),
                   ],
                 )
                 : const SizedBox(),
@@ -49,11 +49,11 @@ class _LogOutState extends State<LogOut> {
             content: const Text('Are you sure you want to log out?'),
             actions: [
               TextButton(
-                onPressed: () => Navigator.of(context, rootNavigator: true).pop(false),
-                child: const Text('Cancel', style: TextStyle(color: Colors.grey)),
+                onPressed: () => Navigator.of(context).pop(false),
+                child: const Text('Cancel'),
               ),
               TextButton(
-                onPressed: () => Navigator.of(context, rootNavigator: true).pop(true),
+                onPressed: () => Navigator.of(context).pop(true),
                 child: const Text('Logout', style: TextStyle(color: Colors.red)),
               ),
             ],
@@ -61,31 +61,33 @@ class _LogOutState extends State<LogOut> {
     );
 
     if (confirmed == true) {
-      // Use rootNavigator to ensure we're modifying the correct navigation stack
-      Navigator.of(context, rootNavigator: true).popUntil((route) => route.isFirst);
       await _logout(context);
     } else {
-      Navigator.of(context, rootNavigator: true).pop();
+      if (mounted) Navigator.of(context).pop();
     }
   }
 
   Future<void> _logout(BuildContext context) async {
+    if (!mounted) return;
     setState(() => _isLoggingOut = true);
 
     try {
       final prefs = await SharedPreferences.getInstance();
-      await prefs.remove('user_pin');
-      await prefs.setBool('isLocalAuthEnabled', false); // Ensure this is cleared
+      // Only clear the authentication status, not the auth settings
+      await prefs.setBool('isAuthenticated', false);
+      await prefs.setString('lastAuthTime', DateTime.now().toIso8601String());
 
-      // Navigate using root navigator
+      if (!mounted) return;
       Navigator.of(context, rootNavigator: true).pushAndRemoveUntil(
         MaterialPageRoute(builder: (_) => const AuthWrapper()),
         (route) => false,
       );
     } catch (e) {
+      if (!mounted) return;
       ScaffoldMessenger.of(
         context,
       ).showSnackBar(SnackBar(content: Text('Logout failed: $e'), backgroundColor: Colors.red));
+      Navigator.of(context).pop();
     } finally {
       if (mounted) setState(() => _isLoggingOut = false);
     }

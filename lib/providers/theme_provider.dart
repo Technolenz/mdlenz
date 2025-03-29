@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 class ThemeProvider with ChangeNotifier {
   // Default theme is Amber & Blue
@@ -38,8 +39,19 @@ class ThemeProvider with ChangeNotifier {
   static ThemeData get lightBlueAccentTheme => _lightBlueAccentTheme;
 
   // Toggle between themes
-  void toggleTheme() {
-    _currentTheme = (_currentTheme == _amberBlueTheme) ? _lightBlueAccentTheme : _amberBlueTheme;
-    notifyListeners(); // Notify listeners to rebuild the UI
+  Future<void> toggleTheme() async {
+    bool isSecondaryThemed = await _fetchTheme();
+    _currentTheme = isSecondaryThemed ? _amberBlueTheme : _lightBlueAccentTheme;
+
+    // Save the new theme preference
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setBool('isSecondaryThemed', !isSecondaryThemed);
+
+    notifyListeners();
+  }
+
+  Future<bool> _fetchTheme() async {
+    final prefs = await SharedPreferences.getInstance();
+    return prefs.getBool('isSecondaryThemed') ?? false;
   }
 }

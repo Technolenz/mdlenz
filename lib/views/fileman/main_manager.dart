@@ -1,12 +1,12 @@
 import 'dart:io';
-import 'dart:typed_data';
 
-import 'package:file_picker/file_picker.dart'; // For file picking
+import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
-import 'package:flutter_markdown/flutter_markdown.dart';
+import 'package:provider/provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
-import '../home/home_screen.dart'; // Import HomeScreen instead of RawViewScreen
+import '../../providers/googleprovider.dart';
+import '../home/home_screen.dart';
 
 class MainManagerScreen extends StatefulWidget {
   const MainManagerScreen({super.key});
@@ -17,31 +17,32 @@ class MainManagerScreen extends StatefulWidget {
 
 class _MainManagerScreenState extends State<MainManagerScreen> {
   Map<String, String> _savedMarkdowns = {};
-  bool _isDarkMode = false; // Dark mode toggle
-  String _searchQuery = ''; // Search query
-  final List<String> _selectedFiles = []; // Selected files for batch actions
+  final List<String> _selectedFiles = [];
+  bool _isSelectMode = false;
+  late GoogleProvider _googleProvider;
 
-  // Load all saved Markdown files from SharedPreferences
-  Future<void> _loadSavedMarkdowns() async {
-    final prefs = await SharedPreferences.getInstance();
-    final keys = prefs.getKeys().where((key) => key.startsWith('markdown_')).toList();
-    final markdowns = <String, String>{};
-    for (final key in keys) {
-      markdowns[key] = prefs.getString(key) ?? '';
-    }
-    setState(() {
-      _savedMarkdowns = markdowns;
-    });
+  @override
+  void initState() {
+    super.initState();
+    _googleProvider = Provider.of<GoogleProvider>(context, listen: false);
+    _loadSavedMarkdowns();
   }
 
-  // Delete a specific Markdown file
+  Future<void> _loadSavedMarkdowns() async {
+    final prefs = await SharedPreferences.getInstance();
+    final keys = prefs.getKeys().where((key) => key.startsWith('markdown_'));
+    final markdowns = {for (final key in keys) key: prefs.getString(key) ?? ''};
+    setState(() => _savedMarkdowns = markdowns);
+  }
+
   Future<void> _deleteMarkdown(String key) async {
     final prefs = await SharedPreferences.getInstance();
     await prefs.remove(key);
-    await _loadSavedMarkdowns(); // Refresh the list
+    _savedMarkdowns.remove(key);
+    await _googleProvider.syncMarkdown(key, '');
+    setState(() {});
   }
 
-  // Delete selected files
   Future<void> _deleteSelectedFiles() async {
     final prefs = await SharedPreferences.getInstance();
     for (final key in _selectedFiles) {
@@ -49,228 +50,294 @@ class _MainManagerScreenState extends State<MainManagerScreen> {
     }
     setState(() {
       _selectedFiles.clear();
+      _isSelectMode = false;
     });
-    await _loadSavedMarkdowns(); // Refresh the list
+    await _loadSavedMarkdowns();
   }
 
-  // Import Markdown files from the OS
   Future<void> _uploadMarkdowns() async {
     try {
-      // Allow the user to pick a file
       FilePickerResult? result = await FilePicker.platform.pickFiles(
         type: FileType.custom,
         allowedExtensions: ['md'],
+        allowMultiple: true,
       );
 
       if (result != null && result.files.isNotEmpty) {
-        final file = result.files.single;
-
-        // Check if the file bytes are available
-        Uint8List? fileBytes = file.bytes;
-
-        String fileContent;
-        if (fileBytes != null) {
-          // Read the file content from bytes
-          fileContent = String.fromCharCodes(fileBytes);
-        } else if (file.path != null) {
-          // Read the file content from the file path
-          final filePath = file.path!;
-          final fileData = File(filePath);
-          fileContent = await fileData.readAsString();
-        } else {
-          // Handle case where neither bytes nor path is available
-          if (mounted) {
-            ScaffoldMessenger.of(
-              context,
-            ).showSnackBar(const SnackBar(content: Text('Failed to read file content.')));
-          }
-          return;
-        }
-
-        // Save the file content to SharedPreferences
         final prefs = await SharedPreferences.getInstance();
-        final timestamp = DateTime.now().millisecondsSinceEpoch.toString();
-        final key = 'markdown_$timestamp';
-        await prefs.setString(key, fileContent);
+        int successCount = 0;
 
-        // Refresh the list of saved Markdowns
-        await _loadSavedMarkdowns();
+        for (final file in result.files) {
+          try {
+            final fileContent =
+                file.bytes != null
+                    ? String.fromCharCodes(file.bytes!)
+                    : await File(file.path!).readAsString();
 
-        // Show a success message
-        if (mounted) {
-          ScaffoldMessenger.of(
-            context,
-          ).showSnackBar(const SnackBar(content: Text('Markdown file imported successfully!')));
+            final timestamp = DateTime.now().millisecondsSinceEpoch.toString();
+            final key = 'markdown_$timestamp';
+
+            await prefs.setString(key, fileContent);
+            if (_googleProvider.isSyncEnabled) {
+              await _googleProvider.syncMarkdown(key, fileContent);
+            }
+
+            successCount++;
+          } catch (e) {
+            debugPrint('Error importing ${file.name}: $e');
+          }
         }
-      } else {
-        // User canceled the file picker or no file was selected
+
+        await _loadSavedMarkdowns();
         if (mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(content: Text('File import canceled or no file selected.')),
+            SnackBar(content: Text('Imported $successCount/${result.files.length} files')),
           );
         }
       }
     } catch (e) {
-      // Handle errors
       if (mounted) {
         ScaffoldMessenger.of(
           context,
-        ).showSnackBar(SnackBar(content: Text('Failed to import file: $e')));
+        ).showSnackBar(SnackBar(content: Text('Import error: ${e.toString()}')));
       }
     }
   }
 
-  // Toggle dark mode
-  void _toggleDarkMode() {
-    setState(() {
-      _isDarkMode = !_isDarkMode;
-    });
+  Map<String, String> _filterFiles(String searchQuery) {
+    if (searchQuery.isEmpty) return _savedMarkdowns;
+
+    return Map.fromEntries(
+      _savedMarkdowns.entries.where((entry) {
+        final query = searchQuery.toLowerCase();
+        return entry.value.toLowerCase().contains(query) || entry.key.toLowerCase().contains(query);
+      }),
+    );
   }
 
-  // Filter files based on search query
-  Map<String, String> _filterFiles() {
-    if (_searchQuery.isEmpty) {
-      return _savedMarkdowns;
+  String _formatDate(String timestamp) {
+    try {
+      final date = DateTime.fromMillisecondsSinceEpoch(int.parse(timestamp));
+      return '${date.day}/${date.month}/${date.year}';
+    } catch (e) {
+      return timestamp;
     }
-    return _savedMarkdowns.entries
-        .where(
-          (entry) =>
-              entry.key.toLowerCase().contains(_searchQuery.toLowerCase()) ||
-              entry.value.toLowerCase().contains(_searchQuery.toLowerCase()),
-        )
-        .fold(<String, String>{}, (map, entry) {
-          map[entry.key] = entry.value;
-          return map;
-        });
   }
 
-  @override
-  void initState() {
-    super.initState();
-    _loadSavedMarkdowns(); // Load saved Markdowns when the screen is initialized
+  String _getPreviewText(String content) {
+    return content
+        .split('\n')
+        .firstWhere((line) => line.trim().isNotEmpty, orElse: () => 'Empty document');
   }
 
   @override
   Widget build(BuildContext context) {
-    final filteredFiles = _filterFiles();
+    final theme = Theme.of(context);
 
     return Scaffold(
       appBar: AppBar(
-        title: const Text('Saved Markdowns'),
+        title: const Text('Markdown Manager'),
         actions: [
-          IconButton(
-            icon: const Icon(Icons.refresh),
-            onPressed: _loadSavedMarkdowns,
-            tooltip: 'Refresh',
-          ),
-          IconButton(
-            icon: const Icon(Icons.upload),
-            onPressed: _uploadMarkdowns,
-            tooltip: 'Upload markdowns',
-          ),
-          IconButton(
-            icon: Icon(_isDarkMode ? Icons.light_mode : Icons.dark_mode),
-            onPressed: _toggleDarkMode,
-            tooltip: 'Toggle Dark Mode',
-          ),
-        ],
-      ),
-      body: Column(
-        children: [
-          // Search bar
-          Padding(
-            padding: const EdgeInsets.all(8.0),
-            child: TextField(
-              decoration: InputDecoration(
-                hintText: 'Search Markdowns...',
-                prefixIcon: const Icon(Icons.search),
-                border: OutlineInputBorder(borderRadius: BorderRadius.circular(8)),
-              ),
-              onChanged: (value) {
-                setState(() {
-                  _searchQuery = value;
-                });
-              },
-            ),
-          ),
-          // Batch actions bar
-          if (_selectedFiles.isNotEmpty)
-            Container(
-              padding: const EdgeInsets.symmetric(vertical: 8),
-              color: _isDarkMode ? Colors.grey[800] : Colors.grey[200],
-              child: Row(
-                mainAxisAlignment: MainAxisAlignment.spaceEvenly,
-                children: [
-                  Text('${_selectedFiles.length} selected'),
-                  IconButton(
-                    icon: const Icon(Icons.delete),
-                    onPressed: _deleteSelectedFiles,
-                    tooltip: 'Delete Selected',
+          if (_isSelectMode)
+            IconButton(
+              icon: const Icon(Icons.close),
+              onPressed:
+                  () => setState(() {
+                    _selectedFiles.clear();
+                    _isSelectMode = false;
+                  }),
+            )
+          else
+            IconButton(
+              icon: const Icon(Icons.search),
+              onPressed:
+                  () => showSearch(
+                    context: context,
+                    delegate: _MarkdownSearchDelegate(_savedMarkdowns),
                   ),
-                ],
-              ),
             ),
-          // List of saved Markdowns
-          Expanded(
-            child: ListView(
-              padding: const EdgeInsets.all(16),
-              children:
-                  filteredFiles.entries.map((entry) {
-                    final key = entry.key;
-                    final markdown = entry.value;
-                    final isSelected = _selectedFiles.contains(key);
-
-                    return Card(
-                      margin: const EdgeInsets.only(bottom: 16),
-                      color:
-                          isSelected ? (_isDarkMode ? Colors.blue[800] : Colors.blue[100]) : null,
-                      child: ListTile(
-                        title: Text('Draft: ${key.replaceAll('markdown_', '')}'),
-                        subtitle: MarkdownBody(data: markdown),
-                        trailing: IconButton(
-                          icon: const Icon(Icons.delete),
-                          onPressed: () => _deleteMarkdown(key),
-                          tooltip: 'Delete',
-                        ),
-                        onTap: () {
-                          if (_selectedFiles.isNotEmpty) {
-                            setState(() {
-                              if (isSelected) {
-                                _selectedFiles.remove(key);
-                              } else {
-                                _selectedFiles.add(key);
-                              }
-                            });
-                          } else {
-                            // Open the Markdown in HomeScreen for editing
-                            Navigator.push(
-                              context,
-                              MaterialPageRoute(
-                                builder:
-                                    (context) => HomeScreen(
-                                      initialText:
-                                          markdown, // Pass the Markdown content to HomeScreen
-                                    ),
-                              ),
-                            );
-                          }
-                        },
-                        onLongPress: () {
-                          setState(() {
-                            if (isSelected) {
-                              _selectedFiles.remove(key);
-                            } else {
-                              _selectedFiles.add(key);
-                            }
-                          });
-                        },
-                      ),
-                    );
-                  }).toList(),
-            ),
-          ),
+          IconButton(icon: const Icon(Icons.refresh), onPressed: _loadSavedMarkdowns),
+          IconButton(icon: const Icon(Icons.upload_file), onPressed: _uploadMarkdowns),
         ],
       ),
+      body:
+          _savedMarkdowns.isEmpty
+              ? Center(
+                child: Column(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    Icon(Icons.note_add, size: 64, color: theme.hintColor),
+                    const SizedBox(height: 16),
+                    Text('No markdown files found', style: theme.textTheme.titleMedium),
+                    const SizedBox(height: 8),
+                    Text('Tap the upload button to import files', style: theme.textTheme.bodySmall),
+                  ],
+                ),
+              )
+              : ListView.builder(
+                padding: const EdgeInsets.all(8),
+                itemCount: _savedMarkdowns.length,
+                itemBuilder: (context, index) {
+                  final key = _savedMarkdowns.keys.elementAt(index);
+                  final content = _savedMarkdowns[key]!;
+                  final isSelected = _selectedFiles.contains(key);
+                  final timestamp = key.replaceAll('markdown_', '');
+
+                  return Card(
+                    elevation: 2,
+                    margin: const EdgeInsets.symmetric(vertical: 4, horizontal: 8),
+                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+                    color:
+                        isSelected ? theme.colorScheme.primary.withOpacity(0.1) : theme.cardColor,
+                    child: InkWell(
+                      borderRadius: BorderRadius.circular(8),
+                      onTap: () {
+                        if (_isSelectMode) {
+                          setState(() {
+                            isSelected ? _selectedFiles.remove(key) : _selectedFiles.add(key);
+                            if (_selectedFiles.isEmpty) _isSelectMode = false;
+                          });
+                        } else {
+                          Navigator.push(
+                            context,
+                            MaterialPageRoute(
+                              builder:
+                                  (context) => ChangeNotifierProvider(
+                                    create: (_) => GoogleProvider(),
+                                    child: HomeScreen(initialText: content),
+                                  ),
+                            ),
+                          );
+                        }
+                      },
+                      onLongPress: () {
+                        setState(() {
+                          _isSelectMode = true;
+                          isSelected ? _selectedFiles.remove(key) : _selectedFiles.add(key);
+                        });
+                      },
+                      child: Padding(
+                        padding: const EdgeInsets.all(12),
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Row(
+                              children: [
+                                if (_isSelectMode)
+                                  Icon(
+                                    isSelected ? Icons.check_circle : Icons.radio_button_unchecked,
+                                    color: isSelected ? theme.colorScheme.primary : theme.hintColor,
+                                  ),
+                                const SizedBox(width: 8),
+                                Expanded(
+                                  child: Text(
+                                    'Document ${index + 1}',
+                                    style: theme.textTheme.titleMedium,
+                                    overflow: TextOverflow.ellipsis,
+                                  ),
+                                ),
+                                Text(_formatDate(timestamp), style: theme.textTheme.bodySmall),
+                              ],
+                            ),
+                            const SizedBox(height: 8),
+                            Text(
+                              _getPreviewText(content),
+                              style: theme.textTheme.bodyMedium,
+                              maxLines: 2,
+                              overflow: TextOverflow.ellipsis,
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
+                  );
+                },
+              ),
+      floatingActionButton:
+          _selectedFiles.isNotEmpty
+              ? FloatingActionButton.extended(
+                onPressed: _deleteSelectedFiles,
+                icon: const Icon(Icons.delete),
+                label: Text('Delete (${_selectedFiles.length})'),
+                backgroundColor: theme.colorScheme.error,
+              )
+              : null,
     );
+  }
+}
+
+class _MarkdownSearchDelegate extends SearchDelegate {
+  final Map<String, String> markdowns;
+
+  _MarkdownSearchDelegate(this.markdowns);
+
+  @override
+  List<Widget> buildActions(BuildContext context) {
+    return [IconButton(icon: const Icon(Icons.clear), onPressed: () => query = '')];
+  }
+
+  @override
+  Widget buildLeading(BuildContext context) {
+    return IconButton(icon: const Icon(Icons.arrow_back), onPressed: () => close(context, null));
+  }
+
+  @override
+  Widget buildResults(BuildContext context) => _buildSearchResults(context);
+
+  @override
+  Widget buildSuggestions(BuildContext context) => _buildSearchResults(context);
+
+  Widget _buildSearchResults(BuildContext context) {
+    final results =
+        markdowns.entries.where((entry) {
+          final lowerQuery = query.toLowerCase();
+          return entry.value.toLowerCase().contains(lowerQuery) ||
+              entry.key.toLowerCase().contains(lowerQuery);
+        }).toList();
+
+    if (results.isEmpty) {
+      return const Center(child: Text('No matching markdown files found.'));
+    }
+
+    return ListView(
+      children:
+          results.map((entry) {
+            final timestamp = entry.key.replaceAll('markdown_', '');
+            final formattedDate = _formatDate(timestamp);
+            final previewText = _getPreviewText(entry.value);
+
+            return ListTile(
+              title: Text('Document ($formattedDate)'),
+              subtitle: Text(previewText, maxLines: 2, overflow: TextOverflow.ellipsis),
+              onTap: () {
+                Navigator.push(
+                  context,
+                  MaterialPageRoute(
+                    builder:
+                        (context) => HomeScreen(
+                          initialText: entry.value,
+                          isViewOnly: true, // Open in view-only mode first
+                        ),
+                  ),
+                );
+              },
+            );
+          }).toList(),
+    );
+  }
+
+  String _formatDate(String timestamp) {
+    try {
+      final date = DateTime.fromMillisecondsSinceEpoch(int.parse(timestamp));
+      return '${date.day}/${date.month}/${date.year}';
+    } catch (e) {
+      return 'Unknown Date';
+    }
+  }
+
+  String _getPreviewText(String content) {
+    return content
+        .split('\n')
+        .firstWhere((line) => line.trim().isNotEmpty, orElse: () => 'Empty document');
   }
 }

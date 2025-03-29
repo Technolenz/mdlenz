@@ -1,13 +1,15 @@
+import java.util.Properties
+
 plugins {
     id("com.android.application")
     id("kotlin-android")
-    // The Flutter Gradle Plugin must be applied after the Android and Kotlin Gradle plugins.
-    id("dev.flutter.flutter-gradle-plugin")
+    id("dev.flutter.flutter-gradle-plugin") // Flutter Gradle Plugin
+    id("com.google.gms.google-services") // Google Services Plugin
 }
 
 android {
     namespace = "com.technolenz.mdlenz"
-    compileSdk = flutter.compileSdkVersion.toInt()
+    compileSdk = 35
     ndkVersion = "29.0.13113456"
 
     compileOptions {
@@ -20,60 +22,43 @@ android {
     }
 
     defaultConfig {
-        applicationId = "com.technolenz.mdlenz"
-        minSdk = 23
-        targetSdk = flutter.targetSdkVersion.toInt()
-        versionCode = flutter.versionCode.toInt()
-        versionName = flutter.versionName
+        applicationId = "com.technolenz.mdlenz" // Unique Application ID
+        minSdk = 23 // Minimum SDK version
+        targetSdk = flutter.targetSdkVersion // Target SDK version
+        versionCode = flutter.versionCode // Version code for the app
+        versionName = flutter.versionName // Version name for the app
+    }
 
-        // Add multiDex support if needed
-        multiDexEnabled = true
+    signingConfigs {
+        create("release") {
+            // Load keystore properties from a file
+            val keystorePropertiesFile = rootProject.file("keystore.properties")
+            val keystoreProperties = Properties()
+            if (keystorePropertiesFile.exists()) {
+                keystoreProperties.load(keystorePropertiesFile.inputStream())
+            }
+
+            keyAlias = keystoreProperties.getProperty("keyAlias")
+            keyPassword = keystoreProperties.getProperty("keyPassword")
+            storeFile = file("android/app/androidkeystore.jks")
+            storePassword = keystoreProperties.getProperty("storePassword")
+        }
     }
 
     buildTypes {
         release {
-            // TODO: Add your own signing config for the release build.
-            // Signing with the debug keys for now, so `flutter run --release` works.
-            signingConfig = signingConfigs.getByName("debug")
-
-            // Enable code shrinking and obfuscation
-            isMinifyEnabled = true
-            proguardFiles(
-                getDefaultProguardFile("proguard-android-optimize.txt"),
-                "proguard-rules.pro"
-            )
+            // Release build configuration
+            signingConfig = signingConfigs.getByName("release")
+            isMinifyEnabled = true // Enable code shrinking and obfuscation
+            isShrinkResources = true // Enable resource shrinking
         }
-    }
-
-    // Enable view binding if needed
-    viewBinding {
-        enable = true
-    }
-
-    // Enable data binding if needed
-    dataBinding {
-        enable = true
+        debug {
+            // Debug build configuration
+            signingConfig = signingConfigs.getByName("debug")
+        }
     }
 }
 
 flutter {
-    source = "../.."
-}
-
-dependencies {
-    // Add AndroidX dependencies
-    implementation("androidx.core:core-ktx:1.12.0")
-    implementation("androidx.appcompat:appcompat:1.6.1")
-    implementation("androidx.annotation:annotation:1.7.0")
-
-    // Add multiDex support if needed
-    implementation("androidx.multidex:multidex:2.0.1")
-
-    // Add Kotlin standard library
-    implementation("org.jetbrains.kotlin:kotlin-stdlib:1.9.0")
-
-    // Add lifecycle components if needed
-    implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.6.2")
-
-    // Add Flutter dependencies (automatically added by Flutter Gradle plugin)
+    source = "../.." // Flutter module source directory
 }

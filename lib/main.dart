@@ -1,7 +1,9 @@
+import 'package:firebase_core/firebase_core.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:mdlenz/firebase_options.dart';
 import 'package:mdlenz/functions/navigation.dart';
-import 'package:mdlenz/functions/router.dart';
+import 'package:mdlenz/providers/googleprovider.dart';
 import 'package:mdlenz/providers/theme_provider.dart';
 import 'package:mdlenz/views/Misc/about_screen.dart';
 import 'package:mdlenz/views/Misc/info_screen.dart';
@@ -11,12 +13,27 @@ import 'package:mdlenz/views/home/home_screen.dart';
 import 'package:mdlenz/views/settings_screen/settings_screen.dart';
 import 'package:mdlenz/widgets/appbar.dart';
 import 'package:provider/provider.dart';
-import 'package:shared_preferences/shared_preferences.dart'; // Import SharedPreferences
+import 'package:shared_preferences/shared_preferences.dart';
 
 import 'views/auth/localauth_screen.dart';
 
-void main() {
-  runApp(ChangeNotifierProvider(create: (_) => ThemeProvider(), child: const MDLenz()));
+void main() async {
+  WidgetsFlutterBinding.ensureInitialized();
+  try {
+    await Firebase.initializeApp(options: DefaultFirebaseOptions.currentPlatform);
+  } catch (e) {
+    print('Firebase initialization error: $e'); // Debugging error
+  }
+  runApp(
+    MultiProvider(
+      providers: [
+        ChangeNotifierProvider(create: (_) => GoogleProvider()),
+        ChangeNotifierProvider(create: (_) => ThemeProvider()),
+      ],
+
+      child: const MDLenz(),
+    ),
+  );
 }
 
 class MDLenz extends StatelessWidget {
@@ -39,27 +56,62 @@ class AuthWrapper extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return FutureBuilder(
-      future: _checkLocalAuthEnabled(),
-      builder: (context, snapshot) {
-        if (snapshot.connectionState == ConnectionState.waiting) {
-          return const Scaffold(body: Center(child: CircularProgressIndicator()));
-        } else {
-          final bool isLocalAuthEnabled = snapshot.data ?? false;
-          return isLocalAuthEnabled
-              ? AuthScreen(
-                onAuthenticated: () => navigateTo(context: context, page: const MainScreen()),
-              )
-              : const MainScreen();
-        }
-      },
+    return PopScope(
+      canPop: false,
+      child: FutureBuilder(
+        future: _checkAuthStatus(),
+        builder: (context, snapshot) {
+          if (snapshot.connectionState == ConnectionState.waiting) {
+            return const Scaffold(body: Center(child: CircularProgressIndicator()));
+          } else {
+            final requiresAuth = snapshot.data ?? true;
+            final isLocalAuthEnabled = snapshot.data?.$1 ?? false;
+            final isSessionValid = snapshot.data?.$2 ?? false;
+
+            // If local auth is enabled and session is invalid, show auth screen
+            if (isLocalAuthEnabled && !isSessionValid) {
+              return AuthScreen(onAuthenticated: () => _navigateToMainScreen(context));
+            }
+            // Otherwise go straight to main screen
+            return const MainScreen();
+          }
+        },
+      ),
     );
   }
 
-  // Check if local authentication is enabled
-  Future<bool> _checkLocalAuthEnabled() async {
+  void _navigateToMainScreen(BuildContext context) {
+    Navigator.of(context).pushAndRemoveUntil(
+      MaterialPageRoute(builder: (context) => const MainScreen()),
+      (Route<dynamic> route) => false,
+    );
+  }
+
+  // Check both auth settings and session status
+  Future<(bool, bool)> _checkAuthStatus() async {
     final prefs = await SharedPreferences.getInstance();
-    return prefs.getBool('isLocalAuthEnabled') ?? false;
+    final isLocalAuthEnabled = prefs.getBool('isLocalAuthEnabled') ?? false;
+    final isAuthenticated = prefs.getBool('isAuthenticated') ?? false;
+
+    // If not using local auth, no need to check session
+    if (!isLocalAuthEnabled) return (false, true);
+
+    // Check session expiration if authenticated
+    if (isAuthenticated) {
+      final lastAuthTime = prefs.getString('lastAuthTime');
+      if (lastAuthTime != null) {
+        final lastAuth = DateTime.parse(lastAuthTime);
+        final now = DateTime.now();
+        final difference = now.difference(lastAuth);
+        final isSessionValid = difference.inMinutes < 60;
+
+        // Return both auth enabled status and session validity
+        return (true, isSessionValid);
+      }
+    }
+
+    // Default case - requires authentication
+    return (true, false);
   }
 }
 

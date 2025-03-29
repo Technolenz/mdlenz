@@ -14,10 +14,11 @@ class AuthScreen extends StatefulWidget {
 class _AuthScreenState extends State<AuthScreen> {
   final LocalAuthentication auth = LocalAuthentication();
   final TextEditingController pinController = TextEditingController();
-  String get enteredPin => pinController.text;
   String? _savedPin;
   bool _isAuthenticating = false;
   bool _isBiometricsEnabled = false;
+  bool _isLocalAuthEnabled = false;
+  bool _hasBiometricSupport = false;
 
   @override
   void initState() {
@@ -25,32 +26,63 @@ class _AuthScreenState extends State<AuthScreen> {
     _loadSettings();
   }
 
-  // Load saved settings and PIN
   Future<void> _loadSettings() async {
-    final prefs = await SharedPreferences.getInstance();
-    setState(() {
-      _savedPin = prefs.getString('user_pin');
-      _isBiometricsEnabled = prefs.getBool('isBiometricsEnabled') ?? false;
-    });
-    _checkBiometrics();
-  }
-
-  // Check if biometrics are supported
-  Future<void> _checkBiometrics() async {
-    final bool canAuthenticate = await auth.canCheckBiometrics || await auth.isDeviceSupported();
-
-    if (!canAuthenticate) {
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(const SnackBar(content: Text('Biometrics not supported or not set up')));
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      setState(() {
+        _savedPin = prefs.getString('user_pin');
+        _isBiometricsEnabled = prefs.getBool('isBiometricsEnabled') ?? false;
+        _isLocalAuthEnabled = prefs.getBool('isLocalAuthEnabled') ?? false;
+      });
+      await _checkBiometrics();
+    } catch (e) {
+      _showError('Failed to load settings: $e');
     }
   }
 
-  // Authenticate using biometrics
+  Future<void> _checkBiometrics() async {
+    try {
+      final bool canCheckBiometrics = await auth.canCheckBiometrics;
+      final bool isSupported = await auth.isDeviceSupported();
+
+      setState(() {
+        _hasBiometricSupport = canCheckBiometrics && isSupported;
+      });
+
+      if (!_hasBiometricSupport) {
+        _showMessage('Biometrics not supported or not set up');
+      }
+    } catch (e) {
+      _showError('Biometric check failed: $e');
+    }
+  }
+
+  // Add this to your existing _AuthScreenState class
+
+  Future<bool> _checkSessionExpired() async {
+    final prefs = await SharedPreferences.getInstance();
+    final lastAuthTime = prefs.getString('lastAuthTime');
+
+    if (lastAuthTime == null) return true;
+
+    final lastAuth = DateTime.parse(lastAuthTime);
+    final now = DateTime.now();
+    final difference = now.difference(lastAuth);
+
+    return difference.inMinutes >= 60; // 1 hour expiration
+  }
+
+  Future<void> _updateAuthStatus() async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setBool('isAuthenticated', true);
+    await prefs.setString('lastAuthTime', DateTime.now().toIso8601String());
+  }
+
+  // Modify your authentication methods to call _updateAuthStatus on success
   Future<void> _authenticateWithBiometrics() async {
-    setState(() {
-      _isAuthenticating = true;
-    });
+    if (!_hasBiometricSupport) return;
+
+    setState(() => _isAuthenticating = true);
 
     try {
       final bool didAuthenticate = await auth.authenticate(
@@ -58,57 +90,63 @@ class _AuthScreenState extends State<AuthScreen> {
         options: const AuthenticationOptions(biometricOnly: true),
       );
 
-      if (didAuthenticate) {
+      if (didAuthenticate && mounted) {
+        await _updateAuthStatus();
         widget.onAuthenticated();
       } else {
-        ScaffoldMessenger.of(
-          context,
-        ).showSnackBar(const SnackBar(content: Text('Biometric authentication failed')));
+        _showMessage('Authentication cancelled');
       }
     } catch (e) {
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(SnackBar(content: Text('Biometric authentication failed: $e')));
+      _showError('Biometric authentication failed: $e');
     } finally {
-      setState(() {
-        _isAuthenticating = false;
-      });
+      if (mounted) setState(() => _isAuthenticating = false);
     }
   }
 
-  // Authenticate using PIN
   void _authenticateWithPin() {
     final enteredPin = pinController.text;
 
     if (enteredPin.isEmpty) {
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(const SnackBar(content: Text('Please enter a PIN')));
+      _showMessage('Please enter a PIN');
       return;
     }
 
     if (enteredPin.length != 4) {
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(const SnackBar(content: Text('PIN must be 4 digits')));
+      _showMessage('PIN must be 4 digits');
       return;
     }
 
     if (enteredPin == _savedPin) {
-      widget.onAuthenticated();
+      _updateAuthStatus().then((_) {
+        widget.onAuthenticated();
+      });
     } else {
-      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Incorrect PIN')));
+      _showMessage('Incorrect PIN');
     }
+  }
+
+  void _showMessage(String message) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(
+      context,
+    ).showSnackBar(SnackBar(content: Text(message), duration: const Duration(seconds: 2)));
+  }
+
+  void _showError(String error) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(error),
+        backgroundColor: Colors.red,
+        duration: const Duration(seconds: 3),
+      ),
+    );
   }
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(
-        title: const Text('Authenticate'),
-        centerTitle: true,
-        elevation: 0, // Remove app bar shadow
-      ),
+      appBar: AppBar(title: const Text('Authenticate'), centerTitle: true, elevation: 0),
       body: Padding(
         padding: const EdgeInsets.symmetric(horizontal: 24.0),
         child: Center(
@@ -122,7 +160,7 @@ class _AuthScreenState extends State<AuthScreen> {
                 ),
                 const SizedBox(height: 32),
 
-                if (_isBiometricsEnabled && _savedPin != null)
+                if (_isBiometricsEnabled && _hasBiometricSupport && _savedPin != null)
                   Column(
                     children: [
                       IconButton(
@@ -147,14 +185,8 @@ class _AuthScreenState extends State<AuthScreen> {
                     labelText: 'Enter PIN',
                     border: OutlineInputBorder(
                       borderRadius: BorderRadius.circular(12),
-                      borderSide: const BorderSide(color: Colors.grey),
+                      borderSide: const BorderSide(color: Colors.white, width: 2),
                     ),
-                    focusedBorder: OutlineInputBorder(
-                      borderRadius: BorderRadius.circular(12),
-                      borderSide: const BorderSide(color: Colors.blue),
-                    ),
-                    filled: true,
-                    fillColor: Colors.grey[200],
                   ),
                 ),
                 const SizedBox(height: 24),
@@ -166,8 +198,6 @@ class _AuthScreenState extends State<AuthScreen> {
                     style: ElevatedButton.styleFrom(
                       padding: const EdgeInsets.symmetric(vertical: 16),
                       shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-                      backgroundColor: Colors.blue,
-                      foregroundColor: Colors.white,
                     ),
                     child:
                         _isAuthenticating

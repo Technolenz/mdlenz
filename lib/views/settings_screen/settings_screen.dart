@@ -1,8 +1,10 @@
 import 'package:flutter/material.dart';
+import 'package:mdlenz/providers/googleprovider.dart';
 import 'package:mdlenz/providers/theme_provider.dart';
 import 'package:mdlenz/views/auth/logout.dart';
 import 'package:provider/provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:url_launcher/url_launcher.dart';
 
 class SettingsScreen extends StatefulWidget {
   const SettingsScreen({super.key});
@@ -12,7 +14,6 @@ class SettingsScreen extends StatefulWidget {
 }
 
 class _SettingsScreenState extends State<SettingsScreen> {
-  final bool _isGoogleCloudSyncEnabled = false;
   bool _isLocalAuthEnabled = false;
   bool _isBiometricsEnabled = false;
   final TextEditingController _pinController = TextEditingController();
@@ -23,7 +24,6 @@ class _SettingsScreenState extends State<SettingsScreen> {
     _loadSettings();
   }
 
-  // Load saved settings
   Future<void> _loadSettings() async {
     final prefs = await SharedPreferences.getInstance();
     setState(() {
@@ -32,19 +32,11 @@ class _SettingsScreenState extends State<SettingsScreen> {
     });
   }
 
-  // Save local auth setting
-  Future<void> _saveLocalAuthSetting(bool value) async {
+  Future<void> _saveSetting(String key, bool value) async {
     final prefs = await SharedPreferences.getInstance();
-    await prefs.setBool('isLocalAuthEnabled', value);
+    await prefs.setBool(key, value);
   }
 
-  // Save biometrics setting
-  Future<void> _saveBiometricsSetting(bool value) async {
-    final prefs = await SharedPreferences.getInstance();
-    await prefs.setBool('isBiometricsEnabled', value);
-  }
-
-  // Set or change PIN
   Future<void> _setPin(BuildContext context) async {
     final prefs = await SharedPreferences.getInstance();
     final newPin = await showDialog<String>(
@@ -57,16 +49,17 @@ class _SettingsScreenState extends State<SettingsScreen> {
               keyboardType: TextInputType.number,
               maxLength: 4,
               obscureText: true,
-              decoration: const InputDecoration(labelText: 'Enter a 4-digit PIN'),
+              decoration: const InputDecoration(
+                labelText: 'Enter a 4-digit PIN',
+                border: OutlineInputBorder(),
+              ),
             ),
             actions: [
-              TextButton(onPressed: () => Navigator.of(context).pop(), child: const Text('Cancel')),
-              TextButton(
+              TextButton(onPressed: () => Navigator.pop(context), child: const Text('Cancel')),
+              ElevatedButton(
                 onPressed: () {
                   final pin = _pinController.text;
-                  if (pin.length == 4) {
-                    Navigator.of(context).pop(pin);
-                  }
+                  if (pin.length == 4) Navigator.pop(context, pin);
                 },
                 child: const Text('Save'),
               ),
@@ -76,106 +69,185 @@ class _SettingsScreenState extends State<SettingsScreen> {
 
     if (newPin != null) {
       await prefs.setString('user_pin', newPin);
+      if (mounted) {
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(const SnackBar(content: Text('PIN saved successfully')));
+      }
+    }
+  }
+
+  Future<void> _launchURL(String url) async {
+    try {
+      final Uri uri = Uri.parse(url);
+      if (!await launchUrl(uri, mode: LaunchMode.externalApplication)) {
+        throw 'Could not launch $url';
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Error: $e')));
+      }
+    }
+  }
+
+  Future<void> _manualSync(GoogleProvider googleProvider) async {
+    final prefs = await SharedPreferences.getInstance();
+    final keys = prefs.getKeys().where((key) => key.startsWith('markdown_')).toList();
+    for (final key in keys) {
+      final content = prefs.getString(key) ?? '';
+      await googleProvider.syncMarkdown(key, content);
+    }
+    if (mounted) {
       ScaffoldMessenger.of(
         context,
-      ).showSnackBar(const SnackBar(content: Text('PIN saved successfully')));
+      ).showSnackBar(const SnackBar(content: Text('Manual sync completed')));
     }
+  }
+
+  Widget _buildSectionHeader(BuildContext context, String title) {
+    return Padding(
+      padding: const EdgeInsets.only(top: 24, bottom: 8),
+      child: Text(
+        title,
+        style: Theme.of(context).textTheme.titleLarge?.copyWith(
+          fontWeight: FontWeight.bold,
+          color: Theme.of(context).colorScheme.primary,
+        ),
+      ),
+    );
+  }
+
+  Widget _buildSectionCard(List<Widget> children) {
+    return Card(
+      elevation: 1,
+      margin: const EdgeInsets.symmetric(vertical: 8),
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+      child: Padding(padding: const EdgeInsets.all(8.0), child: Column(children: children)),
+    );
   }
 
   @override
   Widget build(BuildContext context) {
     final themeProvider = Provider.of<ThemeProvider>(context);
+    final googleProvider = Provider.of<GoogleProvider>(context);
+    final theme = Theme.of(context);
 
     return Scaffold(
-      appBar: AppBar(title: const Text('Settings')),
-      body: ListView(
-        padding: const EdgeInsets.all(16.0),
-        children: [
-          // App Information Section
-          const Text(
-            'App Information',
-            style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold),
-          ),
-          const SizedBox(height: 8),
-          const ListTile(title: Text('Version'), subtitle: Text('1.0.0')),
-          const ListTile(title: Text('Developer'), subtitle: Text('Michael Tunwashe (Technolenz)')),
-          const ListTile(
-            title: Text('GitHub Repository'),
-            subtitle: Text('https://github.com/Technolenz/mdlenz'),
-          ),
-          const Divider(),
-          const SizedBox(height: 16),
+      appBar: AppBar(title: const Text('Settings'), centerTitle: true, elevation: 0),
+      body: SingleChildScrollView(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            _buildSectionHeader(context, 'App Information'),
+            _buildSectionCard([
+              ListTile(
+                leading: const Icon(Icons.info_outline),
+                title: const Text('Version'),
+                subtitle: const Text('1.0.0'),
+              ),
+              const Divider(height: 1),
+              ListTile(
+                leading: const Icon(Icons.person_outline),
+                title: const Text('Developer'),
+                subtitle: const Text('Michael Tunwashe (Technolenz)'),
+              ),
+              const Divider(height: 1),
+              ListTile(
+                leading: const Icon(Icons.code),
+                title: const Text('GitHub Repository'),
+                subtitle: const Text('github.com/Technolenz/mdlenz'),
+                trailing: const Icon(Icons.open_in_new),
+                onTap: () => _launchURL('https://github.com/Technolenz/mdlenz'),
+              ),
+            ]),
 
-          // Theme Settings Section
-          const Text('Theme Settings', style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold)),
-          const SizedBox(height: 8),
-          SwitchListTile(
-            title: const Text('Toggle Theme'),
-            subtitle: const Text('Switch between Amber & Blue and Light Blue Accent themes'),
-            value: themeProvider.currentTheme == ThemeProvider.amberBlueTheme,
-            onChanged: (value) {
-              themeProvider.toggleTheme();
-            },
-          ),
-          const Divider(),
-          const SizedBox(height: 16),
+            _buildSectionHeader(context, 'Appearance'),
+            _buildSectionCard([
+              SwitchListTile(
+                secondary: const Icon(Icons.color_lens_outlined),
+                title: const Text('Dark Mode'),
+                subtitle: const Text('Toggle between light and dark theme'),
+                value: theme.brightness == Brightness.dark,
+                onChanged: (_) => themeProvider.toggleTheme(),
+              ),
+            ]),
 
-          // Google Cloud Sync Settings Section
-          const Text(
-            'Google Cloud Sync',
-            style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold),
-          ),
-          const SizedBox(height: 8),
-          SwitchListTile(
-            title: const Text('Enable Google Cloud Sync'),
-            subtitle: const Text('Save and sync Markdown files to Google Cloud'),
-            value: _isGoogleCloudSyncEnabled,
-            onChanged: (value) {
-              null;
-            },
-          ),
-          const Divider(),
-          const SizedBox(height: 16),
+            _buildSectionHeader(context, 'Cloud Sync'),
+            _buildSectionCard([
+              SwitchListTile(
+                secondary: const Icon(Icons.cloud_outlined),
+                title: const Text('Google Cloud Sync'),
+                subtitle:
+                    googleProvider.isSignedIn
+                        ? Text('Connected as ${googleProvider.user?.email}')
+                        : const Text('Sync your markdown files to the cloud'),
+                value: googleProvider.isSyncEnabled,
+                onChanged: googleProvider.isSyncing ? null : googleProvider.toggleSync,
+              ),
+              if (googleProvider.isSyncing) const LinearProgressIndicator(),
+              if (googleProvider.isSyncEnabled && !googleProvider.isSyncing)
+                Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+                  child: Row(
+                    children: [
+                      Expanded(
+                        child: OutlinedButton.icon(
+                          icon: const Icon(Icons.cloud_off),
+                          label: const Text('Disconnect'),
+                          onPressed: () => googleProvider.toggleSync(false),
+                        ),
+                      ),
+                      const SizedBox(width: 12),
+                      Expanded(
+                        child: ElevatedButton.icon(
+                          icon: const Icon(Icons.sync),
+                          label: const Text('Sync Now'),
+                          onPressed: () => _manualSync(googleProvider),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+            ]),
 
-          // Authentication Settings Section
-          const Text('Authentication', style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold)),
-          const SizedBox(height: 8),
-          SwitchListTile(
-            title: const Text('Enable Local Authentication'),
-            subtitle: const Text('Lock the app using biometrics or PIN'),
-            value: _isLocalAuthEnabled,
-            onChanged: (value) async {
-              setState(() {
-                _isLocalAuthEnabled = value;
-              });
-              await _saveLocalAuthSetting(value);
-            },
-          ),
-          SwitchListTile(
-            title: const Text('Enable Biometrics'),
-            subtitle: const Text('Use biometrics for authentication'),
-            value: _isBiometricsEnabled,
-            onChanged: (value) async {
-              setState(() {
-                _isBiometricsEnabled = value;
-              });
-              await _saveBiometricsSetting(value);
-            },
-          ),
-          ListTile(
-            title: const Text('Set or Change PIN'),
-            subtitle: const Text('Set a 4-digit PIN for authentication'),
-            onTap: () => _setPin(context),
-          ),
-          const Divider(),
-          const SizedBox(height: 16),
-          ListTile(
-            title: const Text('Logout'),
-            onTap: () {
-              Navigator.of(context).push(MaterialPageRoute(builder: (context) => const LogOut()));
-            },
-          ),
-        ],
+            _buildSectionHeader(context, 'Security'),
+            _buildSectionCard([
+              SwitchListTile(
+                secondary: const Icon(Icons.lock_outline),
+                title: const Text('App Lock'),
+                subtitle: const Text('Require authentication to open the app'),
+                value: _isLocalAuthEnabled,
+                onChanged: (value) {
+                  setState(() => _isLocalAuthEnabled = value);
+                  _saveSetting('isLocalAuthEnabled', value);
+                },
+              ),
+              if (_isLocalAuthEnabled)
+                ListTile(
+                  leading: const Icon(Icons.pin_outlined),
+                  title: const Text('Change PIN'),
+                  subtitle: const Text('Set a 4-digit security PIN'),
+                  onTap: () => _setPin(context),
+                ),
+            ]),
+
+            _buildSectionHeader(context, 'Account'),
+            _buildSectionCard([
+              ListTile(
+                leading: const Icon(Icons.exit_to_app),
+                title: const Text('Logout'),
+                textColor: theme.colorScheme.error,
+                iconColor: theme.colorScheme.error,
+                onTap:
+                    () => Navigator.push(
+                      context,
+                      MaterialPageRoute(builder: (context) => const LogOut()),
+                    ),
+              ),
+            ]),
+          ],
+        ),
       ),
     );
   }
